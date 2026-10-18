@@ -62,6 +62,14 @@ function run(arguments) {
         cast_base: null, cast_combined: null, dictionary: null, keys: null,
         class_string: null, class_equal: null, cast_dictionary: null, cast_keys: null,
         cast_class_string: null, cast_class_equal: null, cast_api: null,
+        constant_class_type: null, constant_class_ref: null, constant_class_known: null,
+        constant_service_type: null, constant_service_ref: null, constant_service_known: null,
+        constant_account_type: null, constant_account_ref: null, constant_account_known: null,
+        constant_password_type: null, constant_password_ref: null, constant_password_known: null,
+        constant_return_type: null, constant_return_ref: null, constant_return_known: null,
+        forced_cast: null, forced_keys: null, forced_error: null,
+        literal: null, literal_keys: null, literal_class: null, literal_error: null,
+        object_literal: null, object_literal_keys: null, object_literal_error: null,
         phase: 'default', error: null};
     try {
         const reference = Ref();
@@ -71,6 +79,18 @@ function run(arguments) {
             summary.status = $.SecKeychainGetStatus(reference[0], flags);
             if (summary.status === 0) summary.unlocked = (flags[0] & 1) ? 1 : 0;
             summary.cast_api = typeof ObjC.castRefToObject === 'function' ? 1 : 0;
+            summary.phase = 'constants';
+            const types = ['undefined', 'object', 'function', 'string', 'number', 'boolean', 'symbol', 'bigint'];
+            const constants = [['class', $.kSecClass, 'class'], ['service', $.kSecAttrService, 'svce'],
+                ['account', $.kSecAttrAccount, 'acct'], ['password', $.kSecClassGenericPassword, 'genp'],
+                ['return', $.kSecReturnRef, 'r_Ref']];
+            for (const entry of constants) {
+                const prefix = 'constant_' + entry[0];
+                summary[prefix + '_type'] = types.indexOf(typeof entry[1]);
+                summary[prefix + '_ref'] = Number(entry[1] instanceof Ref);
+                try { summary[prefix + '_known'] = Number(ObjC.unwrap(entry[1]) === entry[2]); }
+                catch (_) { summary[prefix + '_known'] = 0; }
+            }
             for (const mode of ['null_result', 'base', 'ui', 'search', 'limit', 'combined', 'cast_base', 'cast_combined']) {
                 summary.phase = mode;
                 const cast = mode.indexOf('cast_') === 0;
@@ -107,6 +127,40 @@ function run(arguments) {
                 const result = mode === 'null_result' ? null : Ref();
                 summary[mode] = $.SecItemCopyMatching(query, result);
             }
+            const exceptionCode = error => error.name === 'TypeError' ? 1
+                : error.name === 'ReferenceError' ? 2 : error.name === 'Error' ? 3 : 4;
+            summary.phase = 'forced_cast';
+            if (summary.cast_api) {
+                try {
+                    const keys = [$.kSecClass, $.kSecAttrService, $.kSecAttrAccount, $.kSecReturnRef]
+                        .map(value => ObjC.castRefToObject(value));
+                    const values = [ObjC.castRefToObject($.kSecClassGenericPassword),
+                        $('runl-public-tests-readiness'), $(arguments[0]), ObjC.castRefToObject($.kCFBooleanTrue)];
+                    const query = $.NSDictionary.dictionaryWithObjectsForKeys(values, keys);
+                    summary.forced_keys = Number(query.count);
+                    summary.forced_cast = $.SecItemCopyMatching(query, Ref());
+                    summary.forced_error = 0;
+                } catch (error) { summary.forced_error = exceptionCode(error); }
+            }
+            // Apple's public SecItemConstants.c defines these API string values.
+            summary.phase = 'literal';
+            try {
+                const query = $.NSDictionary.dictionaryWithObjectsForKeys(
+                    [$('genp'), $('runl-public-tests-readiness'), $(arguments[0]), $(true)],
+                    [$('class'), $('svce'), $('acct'), $('r_Ref')]);
+                summary.literal_keys = Number(query.count);
+                summary.literal_class = Number(ObjC.unwrap(query.objectForKey($('class'))) === 'genp');
+                summary.literal = $.SecItemCopyMatching(query, Ref());
+                summary.literal_error = 0;
+            } catch (error) { summary.literal_error = exceptionCode(error); }
+            summary.phase = 'object_literal';
+            try {
+                const query = $({'class': 'genp', 'svce': 'runl-public-tests-readiness',
+                    'acct': arguments[0], 'r_Ref': true});
+                summary.object_literal_keys = Number(query.count);
+                summary.object_literal = $.SecItemCopyMatching(query, Ref());
+                summary.object_literal_error = 0;
+            } catch (error) { summary.object_literal_error = exceptionCode(error); }
         }
         summary.phase = 'done';
     } catch (error) {
@@ -135,8 +189,16 @@ function run(arguments) {
         return prefix + "; category=invalid-status"
     numeric = ("copy", "status", "unlocked", "null_result", "base", "ui", "search", "limit", "combined",
                "cast_base", "cast_combined", "dictionary", "keys", "class_string", "class_equal",
-               "cast_dictionary", "cast_keys", "cast_class_string", "cast_class_equal", "cast_api")
-    phases = ("default", "null_result", "base", "ui", "search", "limit", "combined", "cast_base", "cast_combined", "done")
+               "cast_dictionary", "cast_keys", "cast_class_string", "cast_class_equal", "cast_api",
+               "constant_class_type", "constant_class_ref", "constant_class_known",
+               "constant_service_type", "constant_service_ref", "constant_service_known",
+               "constant_account_type", "constant_account_ref", "constant_account_known",
+               "constant_password_type", "constant_password_ref", "constant_password_known",
+               "constant_return_type", "constant_return_ref", "constant_return_known",
+               "forced_cast", "forced_keys", "forced_error", "literal", "literal_keys", "literal_class", "literal_error",
+               "object_literal", "object_literal_keys", "object_literal_error")
+    phases = ("default", "constants", "null_result", "base", "ui", "search", "limit", "combined", "cast_base",
+              "cast_combined", "forced_cast", "literal", "object_literal", "done")
     errors = (None, "type-error", "reference-error", "error", "exception")
     if (not isinstance(values, dict) or set(values) != {*numeric, "phase", "error"}
             or any(value is not None and (type(value) is not int or not -(2**31) <= value < 2**31)
