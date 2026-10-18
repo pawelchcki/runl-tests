@@ -1,0 +1,157 @@
+name: Published runl acceptance
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "23 5 * * *"
+  workflow_dispatch:
+    inputs:
+      digest:
+        description: "Optional production OCI index digest (sha256: followed by 64 lowercase hex characters)"
+        required: false
+        default: ""
+        type: string
+  repository_dispatch:
+    types: [runl-published]
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    name: Resolve one published package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      digest: ${{ steps.resolve.outputs.digest }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+      - name: Validate the request and resolve its immutable digest
+        id: resolve
+        shell: python
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          MANUAL_DIGEST: ${{ inputs.digest }}
+          DISPATCH_DIGEST: ${{ github.event.client_payload.digest }}
+        run: |
+          import os
+          import re
+          import subprocess
+          import sys
+
+          event = os.environ["EVENT_NAME"]
+          requested = ""
+          if event == "repository_dispatch":
+              requested = os.environ.get("DISPATCH_DIGEST", "")
+              if not requested:
+                  raise SystemExit("runl-published requires an immutable package digest")
+          elif event == "workflow_dispatch":
+              requested = os.environ.get("MANUAL_DIGEST", "")
+          if requested and not re.fullmatch(r"sha256:[0-9a-f]{64}", requested):
+              raise SystemExit("Expected an immutable sha256 package digest")
+          result = subprocess.run(
+              [sys.executable, "download.py", "resolve", "--reference", requested or "latest"],
+              check=True, stdout=subprocess.PIPE, text=True,
+          )
+          digest = result.stdout.strip()
+          if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+              raise SystemExit("The package resolver did not return an immutable digest")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write("digest=" + digest + "\n")
+          print("Resolved public package:", digest)
+
+  native:
+    name: Native acceptance (${{ matrix.runner }})
+    needs: resolve
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-24.04
+          - ubuntu-24.04-arm
+          - macos-14
+          - macos-15-intel
+          - windows-2025
+    env:
+      RUNL_PACKAGE_DIGEST: ${{ needs.resolve.outputs.digest }}
+      TMPDIR: ${{ runner.temp }}
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+      - name: Verify the native TLS test dependency
+        shell: python
+        run: |
+          import shutil
+          import subprocess
+
+          openssl = shutil.which("openssl")
+          if openssl is None:
+              raise SystemExit("The native runner image must provide OpenSSL")
+          subprocess.run([openssl, "version"], check=True, timeout=15)
+      - name: Fetch the exact resolved executable
+        id: download
+        shell: python
+        run: |
+          import os
+          import re
+          import json
+          from run import prepare
+
+          digest = os.environ["RUNL_PACKAGE_DIGEST"]
+          if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+              raise SystemExit("Missing immutable package digest")
+          receipt = prepare(digest)
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
+              output.write("RUNL_TEST_BINARY=" + receipt["binary"] + "\n")
+              output.write("RUNL_BASELINE_BINARY=" + receipt["baseline_binary"] + "\n")
+              output.write("RUNL_BASELINE_DIGEST=" + receipt["baseline_index_digest"] + "\n")
+              output.write("RUNL_TEST_BINARY_SHA256=" + receipt["binary_digest"].removeprefix("sha256:") + "\n")
+          print(json.dumps({key: value for key, value in receipt.items() if key not in ("binary", "baseline_binary")}))
+      - name: Test the published CLI and downloader
+        id: acceptance
+        run: python -m unittest discover -s tests -v
+      - name: Write a safe result receipt
+        id: receipt
+        if: ${{ always() && steps.download.outcome == 'success' }}
+        shell: python
+        env:
+          ACCEPTANCE_OUTCOME: ${{ steps.acceptance.outcome }}
+          RUNNER_LABEL: ${{ matrix.runner }}
+        run: |
+          import json
+          import os
+          from pathlib import Path
+          import platform
+
+          receipt = {
+              "schema": 1,
+              "package_digest": os.environ["RUNL_PACKAGE_DIGEST"],
+              "executable_sha256": os.environ["RUNL_TEST_BINARY_SHA256"],
+              "baseline_package_digest": os.environ["RUNL_BASELINE_DIGEST"],
+              "test_commit": os.environ["GITHUB_SHA"],
+              "runner": os.environ["RUNNER_LABEL"],
+              "os": platform.system(),
+              "architecture": platform.machine(),
+              "outcome": os.environ["ACCEPTANCE_OUTCOME"],
+          }
+          Path("receipt.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ always() && steps.receipt.outcome == 'success' }}
+        with:
+          name: receipt-${{ matrix.runner }}
+          path: receipt.json
+          if-no-files-found: error
+          retention-days: 1
