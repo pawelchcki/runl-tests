@@ -107,6 +107,8 @@ jobs:
           import os
           import re
           import json
+          import sys
+          sys.path.insert(0, os.environ["GITHUB_WORKSPACE"])
           from run import prepare
 
           digest = os.environ["RUNL_PACKAGE_DIGEST"]
