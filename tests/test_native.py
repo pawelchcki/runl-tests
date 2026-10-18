@@ -72,6 +72,7 @@ function run(arguments) {
         object_literal: null, object_literal_keys: null, object_literal_error: null,
         incremental_raw: null, incremental_raw_keys: null, incremental_raw_error: null,
         incremental_literal: null, incremental_literal_keys: null, incremental_literal_error: null,
+        incremental_cast: null, incremental_cast_keys: null, incremental_cast_error: null,
         object_raw_values: null, object_raw_values_keys: null, object_raw_values_error: null,
         constant_class_deref: null, constant_class_cast: null,
         constant_service_deref: null, constant_service_cast: null,
@@ -173,7 +174,7 @@ function run(arguments) {
                 summary.object_literal = $.SecItemCopyMatching(query, Ref());
                 summary.object_literal_error = 0;
             } catch (error) { summary.object_literal_error = exceptionCode(error); }
-            for (const mode of ['incremental_raw', 'incremental_literal', 'object_raw_values']) {
+            for (const mode of ['incremental_raw', 'incremental_literal', 'incremental_cast', 'object_raw_values']) {
                 summary.phase = mode;
                 try {
                     let query;
@@ -182,7 +183,15 @@ function run(arguments) {
                             'svce': 'runl-public-tests-readiness', 'acct': arguments[0], 'r_Ref': $.kCFBooleanTrue});
                     } else {
                         query = $.NSMutableDictionary.dictionary;
-                        const entries = mode === 'incremental_raw'
+                        const entries = mode === 'incremental_cast'
+                            ? [[ObjC.castRefToObject($.kSecClass), ObjC.castRefToObject($.kSecClassGenericPassword)],
+                               [ObjC.castRefToObject($.kSecAttrService), $('runl-public-tests-readiness')],
+                               [ObjC.castRefToObject($.kSecAttrAccount), $(arguments[0])],
+                               [ObjC.castRefToObject($.kSecReturnRef), ObjC.castRefToObject($.kCFBooleanTrue)],
+                               [ObjC.castRefToObject($.kSecUseAuthenticationUI), ObjC.castRefToObject($.kSecUseAuthenticationUIFail)],
+                               [ObjC.castRefToObject($.kSecMatchLimit), ObjC.castRefToObject($.kSecMatchLimitOne)],
+                               [ObjC.castRefToObject($.kSecMatchSearchList), $.NSArray.arrayWithObject(ObjC.castRefToObject(reference[0]))]]
+                            : mode === 'incremental_raw'
                             ? [[$.kSecClass, $.kSecClassGenericPassword],
                                [$.kSecAttrService, $('runl-public-tests-readiness')],
                                [$.kSecAttrAccount, $(arguments[0])], [$.kSecReturnRef, $.kCFBooleanTrue]]
@@ -233,12 +242,13 @@ function run(arguments) {
                "object_literal", "object_literal_keys", "object_literal_error",
                "incremental_raw", "incremental_raw_keys", "incremental_raw_error",
                "incremental_literal", "incremental_literal_keys", "incremental_literal_error",
+               "incremental_cast", "incremental_cast_keys", "incremental_cast_error",
                "object_raw_values", "object_raw_values_keys", "object_raw_values_error",
                "constant_class_deref", "constant_class_cast", "constant_service_deref", "constant_service_cast",
                "constant_account_deref", "constant_account_cast", "constant_password_deref", "constant_password_cast",
                "constant_return_deref", "constant_return_cast")
     phases = ("default", "constants", "null_result", "base", "ui", "search", "limit", "combined", "cast_base",
-              "cast_combined", "forced_cast", "literal", "object_literal", "incremental_raw", "incremental_literal",
+              "cast_combined", "forced_cast", "literal", "object_literal", "incremental_raw", "incremental_literal", "incremental_cast",
               "object_raw_values", "done")
     errors = (None, "type-error", "reference-error", "error", "exception")
     if (not isinstance(values, dict) or set(values) != {*numeric, "phase", "error"}
@@ -520,8 +530,6 @@ class DeviceSessionTests(RuntimeCase):
     @unittest.skipUnless(sys.platform == "darwin" or os.name == "nt", "Native persistence is required on macOS and Windows")
     def test_saved_native_login_reuses_replaces_and_removes_credentials(self):
         self.config(credential_backend="auto", auto_update=False)
-        keychain = macos_keychain_preflight()
-        osascript = macos_osascript_preflight(self.env)
         with DeviceFixture(self.root / "https") as server:
             attempted = False
 
@@ -531,7 +539,10 @@ class DeviceSessionTests(RuntimeCase):
                 return result
 
             initial = runl("auth", "status")
-            self.assert_status(initial, 0, f"Initial native status failed ({keychain}; {osascript})")
+            if initial.returncode:
+                keychain = macos_keychain_preflight()
+                osascript = macos_osascript_preflight(self.env)
+                self.assert_status(initial, 0, f"Initial native status failed ({keychain}; {osascript})")
             self.assertTrue(self.json_result(initial).get("authenticated") is False,
                             "Fresh localhost origin already has a login; no credential changed")
             try:
