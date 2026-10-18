@@ -82,7 +82,6 @@ jobs:
           - windows-2025
     env:
       RUNL_PACKAGE_DIGEST: ${{ needs.resolve.outputs.digest }}
-      TMPDIR: ${{ runner.temp }}
       PYTHONUNBUFFERED: "1"
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -122,6 +121,8 @@ jobs:
           print(json.dumps({key: value for key, value in receipt.items() if key not in ("binary", "baseline_binary")}))
       - name: Test the published CLI and downloader
         id: acceptance
+        env:
+          TMPDIR: ${{ runner.temp }}
         run: python -m unittest discover -s tests -v
       - name: Write a safe result receipt
         id: receipt
