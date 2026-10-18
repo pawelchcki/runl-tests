@@ -45,6 +45,66 @@ def macos_keychain_preflight():
         return "macos-keychain-preflight=unavailable"
 
 
+def macos_osascript_preflight(environment):
+    """Check the public Security API in a child with the CLI's filtered env."""
+    if sys.platform != "darwin":
+        return "macos-osascript=not-applicable"
+    # Independently authored OS availability query: no item lookup or contents.
+    script = """
+ObjC.import('Security');
+function run() {
+    try {
+        const reference = Ref();
+        const copied = $.SecKeychainCopyDefault(reference);
+        let checked = null;
+        let unlocked = null;
+        if (copied === 0) {
+            const flags = Ref();
+            checked = $.SecKeychainGetStatus(reference[0], flags);
+            if (checked === 0) unlocked = (flags[0] & 1) ? 1 : 0;
+        }
+        return JSON.stringify([copied, checked, unlocked]);
+    } catch (error) {
+        if (error.name === 'TypeError') return 'os-query-type-error';
+        if (error.name === 'ReferenceError') return 'os-query-reference-error';
+        if (error.name === 'Error') return 'os-query-error';
+        return 'os-query-exception';
+    }
+}
+"""
+    try:
+        result = subprocess.run(
+            ["/usr/bin/osascript", "-l", "JavaScript", "-e", script],
+            env=dict(environment), capture_output=True, timeout=10,
+        )
+    except subprocess.TimeoutExpired:
+        return "macos-osascript=timeout"
+    except OSError:
+        return "macos-osascript=unavailable"
+    prefix = f"macos-osascript-exit={result.returncode}"
+    if result.returncode != 0:
+        return prefix + "; category=os-query-failed"
+    markers = {
+        b"os-query-type-error": "os-query-type-error",
+        b"os-query-reference-error": "os-query-reference-error",
+        b"os-query-error": "os-query-error",
+        b"os-query-exception": "os-query-exception",
+    }
+    category = markers.get(result.stdout.strip())
+    if category:
+        return prefix + "; category=" + category
+    try:
+        values = json.loads(result.stdout)
+    except (ValueError, UnicodeError):
+        return prefix + "; category=invalid-status"
+    if (not isinstance(values, list) or len(values) != 3
+            or type(values[0]) is not int or not -(2**31) <= values[0] < 2**31
+            or (values[1] is not None and (type(values[1]) is not int or not -(2**31) <= values[1] < 2**31))
+            or (values[2] is not None and (type(values[2]) is not int or values[2] not in (0, 1)))):
+        return prefix + "; category=invalid-status"
+    return prefix + f"; copy={values[0]}; status={values[1]}; unlocked={values[2]}"
+
+
 class SecretProcessTests(RuntimeCase):
     def release_fixture(self, directory="https", response=None):
         bearer = secrets.token_urlsafe(48)
@@ -315,6 +375,7 @@ class DeviceSessionTests(RuntimeCase):
     def test_saved_native_login_reuses_replaces_and_removes_credentials(self):
         self.config(credential_backend="auto", auto_update=False)
         keychain = macos_keychain_preflight()
+        osascript = macos_osascript_preflight(self.env)
         with DeviceFixture(self.root / "https") as server:
             attempted = False
 
@@ -324,7 +385,7 @@ class DeviceSessionTests(RuntimeCase):
                 return result
 
             initial = runl("auth", "status")
-            self.assert_status(initial, 0, f"Initial native status failed ({keychain})")
+            self.assert_status(initial, 0, f"Initial native status failed ({keychain}; {osascript})")
             self.assertTrue(self.json_result(initial).get("authenticated") is False,
                             "Fresh localhost origin already has a login; no credential changed")
             try:
