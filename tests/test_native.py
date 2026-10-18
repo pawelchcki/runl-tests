@@ -16,6 +16,35 @@ from tests.https_fixture import HttpsFixture, hashed_ca_directory, localhost_cer
 from tests.support import RuntimeCase
 
 
+def macos_keychain_preflight():
+    """Read only OS availability and lock state; never request credential items."""
+    if sys.platform != "darwin":
+        return "macos-keychain=not-applicable"
+    import ctypes
+
+    try:
+        security = ctypes.CDLL("/System/Library/Frameworks/Security.framework/Security")
+        core = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+        security.SecKeychainCopyDefault.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
+        security.SecKeychainCopyDefault.restype = ctypes.c_int32
+        security.SecKeychainGetStatus.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
+        security.SecKeychainGetStatus.restype = ctypes.c_int32
+        core.CFRelease.argtypes = [ctypes.c_void_p]
+        core.CFRelease.restype = None
+        wallet = ctypes.c_void_p()
+        copied = security.SecKeychainCopyDefault(ctypes.byref(wallet))
+        status = ctypes.c_uint32()
+        try:
+            checked = security.SecKeychainGetStatus(wallet, ctypes.byref(status)) if copied == 0 else None
+        finally:
+            if wallet.value:
+                core.CFRelease(wallet)
+        unlocked = int(bool(status.value & 1)) if checked == 0 else None
+        return f"macos-keychain-copy={copied}; status={checked}; unlocked={unlocked}"
+    except (OSError, AttributeError):
+        return "macos-keychain-preflight=unavailable"
+
+
 class SecretProcessTests(RuntimeCase):
     def release_fixture(self, directory="https", response=None):
         bearer = secrets.token_urlsafe(48)
@@ -285,6 +314,7 @@ class DeviceSessionTests(RuntimeCase):
     @unittest.skipUnless(sys.platform == "darwin" or os.name == "nt", "Native persistence is required on macOS and Windows")
     def test_saved_native_login_reuses_replaces_and_removes_credentials(self):
         self.config(credential_backend="auto", auto_update=False)
+        keychain = macos_keychain_preflight()
         with DeviceFixture(self.root / "https") as server:
             attempted = False
 
@@ -294,6 +324,7 @@ class DeviceSessionTests(RuntimeCase):
                 return result
 
             initial = runl("auth", "status")
+            self.assert_status(initial, 0, f"Initial native status failed ({keychain})")
             self.assertTrue(self.json_result(initial).get("authenticated") is False,
                             "Fresh localhost origin already has a login; no credential changed")
             try:

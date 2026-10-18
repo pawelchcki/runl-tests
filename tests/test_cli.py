@@ -4,8 +4,17 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 
 from tests.support import RuntimeCase
+
+
+def native_path(value):
+    # Portable executables can report Windows drives using POSIX notation.
+    # Compare the named file without requiring one spelling of its drive.
+    if os.name == "nt":
+        value = re.sub(r"^/([A-Za-z])/", r"\1:/", value)
+    return Path(value)
 
 
 class PublishedCli(RuntimeCase):
@@ -62,7 +71,7 @@ class Preferences(RuntimeCase):
         self.preferences.unlink()
         self.preferences.parent.rmdir()
         result = self.show()
-        self.assertEqual(Path(result["path"]), self.preferences)
+        self.assertEqual(native_path(result["path"]), self.preferences)
         self.assertEqual(result["effective"], {
             "update_track": "production", "auto_update": True, "credential_backend": "none",
         })
@@ -70,7 +79,7 @@ class Preferences(RuntimeCase):
         self.assertFalse((self.root / "state").exists())
         path = self.runl("config", "path")
         self.assert_status(path, 0)
-        self.assertTrue(path.stdout.decode().strip() == str(self.preferences), "Wrong preference path")
+        self.assertEqual(native_path(path.stdout.decode().strip()), self.preferences, "Wrong preference path")
 
     def test_preferences_persist_and_environment_overrides_are_temporary(self):
         self.set_preference("update-track", "staging")

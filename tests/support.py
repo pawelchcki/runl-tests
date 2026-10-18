@@ -60,6 +60,20 @@ class RuntimeCase(unittest.TestCase):
 
     def assert_status(self, result, expected, message="Unexpected CLI exit status"):
         # Never attach captured output: a regression may have leaked a secret.
+        if result.returncode != expected:
+            markers = (
+                (b"secure credential store unavailable", "credential-store-unavailable"),
+                (b"credential store is locked", "credential-store-locked"),
+                (b"invalid configuration", "invalid-configuration"),
+                (b"network or transport request failed", "network"),
+                (b"unable to provision environment", "environment"),
+                (b"SyntaxError", "python-syntax-error"),
+                (b"Fatal Python error", "python-initialization"),
+                (b"Python path configuration:", "python-initialization"),
+            )
+            categories = sorted({label for marker, label in markers if marker in result.stderr})
+            category = ",".join(categories) if categories else "unclassified"
+            message += f" [category={category}; stderr_bytes={len(result.stderr)}]"
         self.assertEqual(result.returncode, expected, message)
 
     def json_result(self, result):
