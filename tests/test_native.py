@@ -70,6 +70,14 @@ function run(arguments) {
         forced_cast: null, forced_keys: null, forced_error: null,
         literal: null, literal_keys: null, literal_class: null, literal_error: null,
         object_literal: null, object_literal_keys: null, object_literal_error: null,
+        incremental_raw: null, incremental_raw_keys: null, incremental_raw_error: null,
+        incremental_literal: null, incremental_literal_keys: null, incremental_literal_error: null,
+        object_raw_values: null, object_raw_values_keys: null, object_raw_values_error: null,
+        constant_class_deref: null, constant_class_cast: null,
+        constant_service_deref: null, constant_service_cast: null,
+        constant_account_deref: null, constant_account_cast: null,
+        constant_password_deref: null, constant_password_cast: null,
+        constant_return_deref: null, constant_return_cast: null,
         phase: 'default', error: null};
     try {
         const reference = Ref();
@@ -90,6 +98,10 @@ function run(arguments) {
                 summary[prefix + '_ref'] = Number(entry[1] instanceof Ref);
                 try { summary[prefix + '_known'] = Number(ObjC.unwrap(entry[1]) === entry[2]); }
                 catch (_) { summary[prefix + '_known'] = 0; }
+                try { summary[prefix + '_deref'] = Number(ObjC.unwrap(entry[1][0]) === entry[2]); }
+                catch (_) { summary[prefix + '_deref'] = 0; }
+                try { summary[prefix + '_cast'] = Number(ObjC.unwrap(ObjC.castRefToObject(entry[1])) === entry[2]); }
+                catch (_) { summary[prefix + '_cast'] = 0; }
             }
             for (const mode of ['null_result', 'base', 'ui', 'search', 'limit', 'combined', 'cast_base', 'cast_combined']) {
                 summary.phase = mode;
@@ -161,6 +173,28 @@ function run(arguments) {
                 summary.object_literal = $.SecItemCopyMatching(query, Ref());
                 summary.object_literal_error = 0;
             } catch (error) { summary.object_literal_error = exceptionCode(error); }
+            for (const mode of ['incremental_raw', 'incremental_literal', 'object_raw_values']) {
+                summary.phase = mode;
+                try {
+                    let query;
+                    if (mode === 'object_raw_values') {
+                        query = $({'class': $.kSecClassGenericPassword,
+                            'svce': 'runl-public-tests-readiness', 'acct': arguments[0], 'r_Ref': $.kCFBooleanTrue});
+                    } else {
+                        query = $.NSMutableDictionary.dictionary;
+                        const entries = mode === 'incremental_raw'
+                            ? [[$.kSecClass, $.kSecClassGenericPassword],
+                               [$.kSecAttrService, $('runl-public-tests-readiness')],
+                               [$.kSecAttrAccount, $(arguments[0])], [$.kSecReturnRef, $.kCFBooleanTrue]]
+                            : [[$('class'), $('genp')], [$('svce'), $('runl-public-tests-readiness')],
+                               [$('acct'), $(arguments[0])], [$('r_Ref'), $(true)]];
+                        for (const entry of entries) query.setObjectForKey(entry[1], entry[0]);
+                    }
+                    summary[mode + '_keys'] = Number(query.count);
+                    summary[mode] = $.SecItemCopyMatching(query, Ref());
+                    summary[mode + '_error'] = 0;
+                } catch (error) { summary[mode + '_error'] = exceptionCode(error); }
+            }
         }
         summary.phase = 'done';
     } catch (error) {
@@ -196,9 +230,16 @@ function run(arguments) {
                "constant_password_type", "constant_password_ref", "constant_password_known",
                "constant_return_type", "constant_return_ref", "constant_return_known",
                "forced_cast", "forced_keys", "forced_error", "literal", "literal_keys", "literal_class", "literal_error",
-               "object_literal", "object_literal_keys", "object_literal_error")
+               "object_literal", "object_literal_keys", "object_literal_error",
+               "incremental_raw", "incremental_raw_keys", "incremental_raw_error",
+               "incremental_literal", "incremental_literal_keys", "incremental_literal_error",
+               "object_raw_values", "object_raw_values_keys", "object_raw_values_error",
+               "constant_class_deref", "constant_class_cast", "constant_service_deref", "constant_service_cast",
+               "constant_account_deref", "constant_account_cast", "constant_password_deref", "constant_password_cast",
+               "constant_return_deref", "constant_return_cast")
     phases = ("default", "constants", "null_result", "base", "ui", "search", "limit", "combined", "cast_base",
-              "cast_combined", "forced_cast", "literal", "object_literal", "done")
+              "cast_combined", "forced_cast", "literal", "object_literal", "incremental_raw", "incremental_literal",
+              "object_raw_values", "done")
     errors = (None, "type-error", "reference-error", "error", "exception")
     if (not isinstance(values, dict) or set(values) != {*numeric, "phase", "error"}
             or any(value is not None and (type(value) is not int or not -(2**31) <= value < 2**31)
