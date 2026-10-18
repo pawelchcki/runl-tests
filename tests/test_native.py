@@ -49,32 +49,54 @@ def macos_osascript_preflight(environment):
     """Check the public Security API in a child with the CLI's filtered env."""
     if sys.platform != "darwin":
         return "macos-osascript=not-applicable"
-    # Independently authored OS availability query: no item lookup or contents.
+    # Independently authored public API queries. The random account never has a
+    # stored item; no query requests data or attributes and there are no writes.
     script = """
+ObjC.import('Foundation');
 ObjC.import('Security');
-function run() {
+function run(arguments) {
+    const summary = {copy: null, status: null, unlocked: null,
+        base: null, ui: null, search: null, limit: null, combined: null,
+        phase: 'default', error: null};
     try {
         const reference = Ref();
-        const copied = $.SecKeychainCopyDefault(reference);
-        let checked = null;
-        let unlocked = null;
-        if (copied === 0) {
+        summary.copy = $.SecKeychainCopyDefault(reference);
+        if (summary.copy === 0) {
             const flags = Ref();
-            checked = $.SecKeychainGetStatus(reference[0], flags);
-            if (checked === 0) unlocked = (flags[0] & 1) ? 1 : 0;
+            summary.status = $.SecKeychainGetStatus(reference[0], flags);
+            if (summary.status === 0) summary.unlocked = (flags[0] & 1) ? 1 : 0;
+            for (const mode of ['base', 'ui', 'search', 'limit', 'combined']) {
+                summary.phase = mode;
+                const keys = [$.kSecClass, $.kSecAttrService, $.kSecAttrAccount];
+                const values = [$.kSecClassGenericPassword, $('runl-public-tests-readiness'), $(arguments[0])];
+                if (mode === 'ui' || mode === 'combined') {
+                    keys.push($.kSecUseAuthenticationUI);
+                    values.push($.kSecUseAuthenticationUIFail);
+                }
+                if (mode === 'search' || mode === 'combined') {
+                    keys.push($.kSecMatchSearchList);
+                    values.push($.NSArray.arrayWithArray([reference[0]]));
+                }
+                if (mode === 'limit' || mode === 'combined') {
+                    keys.push($.kSecMatchLimit);
+                    values.push($.kSecMatchLimitOne);
+                }
+                const query = $.NSDictionary.dictionaryWithObjectsForKeys(values, keys);
+                summary[mode] = $.SecItemCopyMatching(query, null);
+            }
         }
-        return JSON.stringify([copied, checked, unlocked]);
+        summary.phase = 'done';
     } catch (error) {
-        if (error.name === 'TypeError') return 'os-query-type-error';
-        if (error.name === 'ReferenceError') return 'os-query-reference-error';
-        if (error.name === 'Error') return 'os-query-error';
-        return 'os-query-exception';
+        summary.error = error.name === 'TypeError' ? 'type-error'
+            : error.name === 'ReferenceError' ? 'reference-error'
+            : error.name === 'Error' ? 'error' : 'exception';
     }
+    return JSON.stringify(summary);
 }
 """
     try:
         result = subprocess.run(
-            ["/usr/bin/osascript", "-l", "JavaScript", "-e", script],
+            ["/usr/bin/osascript", "-l", "JavaScript", "-e", script, uuid.uuid4().hex],
             env=dict(environment), capture_output=True, timeout=10,
         )
     except subprocess.TimeoutExpired:
@@ -84,25 +106,21 @@ function run() {
     prefix = f"macos-osascript-exit={result.returncode}"
     if result.returncode != 0:
         return prefix + "; category=os-query-failed"
-    markers = {
-        b"os-query-type-error": "os-query-type-error",
-        b"os-query-reference-error": "os-query-reference-error",
-        b"os-query-error": "os-query-error",
-        b"os-query-exception": "os-query-exception",
-    }
-    category = markers.get(result.stdout.strip())
-    if category:
-        return prefix + "; category=" + category
     try:
         values = json.loads(result.stdout)
     except (ValueError, UnicodeError):
         return prefix + "; category=invalid-status"
-    if (not isinstance(values, list) or len(values) != 3
-            or type(values[0]) is not int or not -(2**31) <= values[0] < 2**31
-            or (values[1] is not None and (type(values[1]) is not int or not -(2**31) <= values[1] < 2**31))
-            or (values[2] is not None and (type(values[2]) is not int or values[2] not in (0, 1)))):
+    numeric = ("copy", "status", "unlocked", "base", "ui", "search", "limit", "combined")
+    phases = ("default", "base", "ui", "search", "limit", "combined", "done")
+    errors = (None, "type-error", "reference-error", "error", "exception")
+    if (not isinstance(values, dict) or set(values) != {*numeric, "phase", "error"}
+            or any(value is not None and (type(value) is not int or not -(2**31) <= value < 2**31)
+                   for key in numeric for value in [values[key]])
+            or values["unlocked"] not in (None, 0, 1)
+            or values["phase"] not in phases or values["error"] not in errors):
         return prefix + "; category=invalid-status"
-    return prefix + f"; copy={values[0]}; status={values[1]}; unlocked={values[2]}"
+    fields = "; ".join(f"{key}={values[key]}" for key in (*numeric, "phase", "error"))
+    return prefix + "; " + fields
 
 
 class SecretProcessTests(RuntimeCase):
