@@ -16,6 +16,7 @@ import urllib.response
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import download
+import run as launcher
 
 
 def encode(value):
@@ -47,21 +48,22 @@ class Response(io.BytesIO):
 
 
 class Opener:
-    def __init__(self, objects):
+    def __init__(self, objects, track="production"):
         self.objects = objects
+        self.registry = download.registry(track)
         self.requests = []
         self.changes = {}
 
     def open(self, request, timeout):
         self.requests.append(request)
-        path = request.full_url.removeprefix(download.REGISTRY)
+        path = request.full_url.removeprefix(self.registry)
         body = self.objects[path]
         body, headers = self.changes.get(path, (body, {"Content-Length": str(len(body)), "Docker-Content-Digest": download.digest(body)}))
         return Response(body, headers)
 
 
 class Package:
-    def __init__(self, layer=None, platforms=None, config_change=None):
+    def __init__(self, layer=None, platforms=None, config_change=None, track="production"):
         self.binary = b"generated public downloader test data\n"
         self.layer = archive(self.binary) if layer is None else layer
         self.config = {"identity": "sha256", "revision": download.digest(self.binary)[7:47],
@@ -82,8 +84,8 @@ class Package:
                         "/manifests/" + download.digest(self.manifest): self.manifest,
                         "/blobs/" + download.digest(self.config_bytes): self.config_bytes,
                         "/blobs/" + download.digest(self.layer): self.layer}
-        self.opener = Opener(self.objects)
-        self.client = download.Downloader(self.opener)
+        self.opener = Opener(self.objects, track)
+        self.client = download.Downloader(self.opener, track)
 
 
 class DownloadTests(unittest.TestCase):
@@ -238,7 +240,81 @@ class DownloadTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, mock.patch("download.Downloader", return_value=package.client), mock.patch("download.host_platform", return_value=("linux", "amd64")), contextlib.redirect_stdout(io.StringIO()) as output:
             self.assertEqual(download.main(["fetch", "--reference", package.reference, "--output", str(Path(directory) / "runl")]), 0)
             receipt = json.loads(output.getvalue())
-            self.assertEqual(set(receipt), {"index_digest", "manifest_digest", "config_digest", "layer_digest", "binary_digest", "binary_size", "version", "os", "architecture"})
+            self.assertEqual(set(receipt), {"track", "index_digest", "manifest_digest", "config_digest", "layer_digest", "binary_digest", "binary_size", "version", "os", "architecture"})
+            self.assertEqual(receipt["track"], "production")
+
+    def test_only_fixed_tracks_are_accepted_before_network(self):
+        opener = Opener({})
+        for track in ["", "Production", "../production", "production/", "https://other.example", None, {}]:
+            with self.subTest(track=track), self.assertRaisesRegex(download.DownloadError, "^invalid_track$"):
+                download.Downloader(opener, track=track)
+        self.assertEqual(opener.requests, [])
+
+    def test_selected_track_isolated_for_every_anonymous_descriptor_read(self):
+        for track in ["production", "staging"]:
+            package = Package(track=track)
+            self.assertEqual(package.client.resolve("latest"), package.reference)
+            with tempfile.TemporaryDirectory() as directory:
+                output = Path(directory) / "runl"
+                receipt = package.client.fetch(package.reference, output, ("linux", "amd64"))
+                self.assertEqual(output.read_bytes(), package.binary)
+                self.assertEqual(receipt["track"], track)
+            self.assertEqual(len(package.opener.requests), 5)
+            for request in package.opener.requests:
+                self.assertTrue(request.full_url.startswith(download.REGISTRIES[track] + "/"))
+                self.assertIsNone(request.get_header("Authorization"))
+                self.assertIsNone(request.get_header("Cookie"))
+
+    def test_staging_missing_package_never_falls_back_to_production(self):
+        opener = mock.Mock()
+        opener.open.side_effect = urllib.error.HTTPError("https://example.invalid", 404, "not found", {}, None)
+        with self.assertRaisesRegex(download.DownloadError, "^http_failure$"):
+            download.Downloader(opener, track="staging").resolve("latest")
+        self.assertEqual(opener.open.call_count, 1)
+        self.assertEqual(opener.open.call_args.args[0].full_url,
+                         download.REGISTRIES["staging"] + "/manifests/latest")
+
+    def test_workflow_staging_requires_explicit_manual_event_and_valid_input(self):
+        reference = "sha256:" + "a" * 64
+        for event in ["push", "pull_request", "schedule"]:
+            self.assertEqual(launcher.requested_package(event, reference, "staging", reference),
+                             ("production", "latest"))
+        self.assertEqual(launcher.requested_package("repository_dispatch", reference, "staging", reference),
+                         ("production", reference))
+        for track in ["production", "staging"]:
+            self.assertEqual(launcher.requested_package("workflow_dispatch", "", track), (track, "latest"))
+            self.assertEqual(launcher.requested_package("workflow_dispatch", reference, track), (track, reference))
+        with self.assertRaisesRegex(download.DownloadError, "^immutable_reference_required$"):
+            launcher.requested_package("repository_dispatch")
+        for invalid in ["latest", "../production", "sha256:" + "A" * 64, "https://other.example"]:
+            with self.assertRaisesRegex(download.DownloadError, "^invalid_reference$"):
+                launcher.requested_package("workflow_dispatch", invalid, "staging")
+        with self.assertRaisesRegex(download.DownloadError, "^invalid_track$"):
+            launcher.requested_package("workflow_dispatch", reference, "../production")
+
+    def test_staging_prepare_keeps_baseline_in_production_and_distinct(self):
+        reference = "sha256:" + "a" * 64
+        for current_digest in ["sha256:" + "b" * 64, launcher.BASELINE_BINARY]:
+            current, production = mock.Mock(), mock.Mock()
+            current.resolve.return_value = reference
+            current.fetch.return_value = {"track": "staging", "index_digest": reference,
+                                          "binary_digest": current_digest}
+            production.fetch.return_value = {"binary_digest": "sha256:" + "c" * 64}
+            with tempfile.TemporaryDirectory() as directory, mock.patch.object(launcher, "ROOT", Path(directory)), \
+                    mock.patch.object(launcher, "Downloader", side_effect=[current, production]) as constructor:
+                receipt = launcher.prepare(reference, "staging")
+            self.assertEqual(constructor.call_args_list, [mock.call(track="staging"), mock.call(track="production")])
+            baseline_index = launcher.ALTERNATE_INDEX if current_digest == launcher.BASELINE_BINARY else launcher.BASELINE_INDEX
+            self.assertEqual(production.fetch.call_args.args[0], baseline_index)
+            self.assertEqual(current.fetch.call_args.args[0], reference)
+            self.assertEqual(receipt["track"], "staging")
+            self.assertEqual(receipt["baseline_track"], "production")
+            self.assertEqual(receipt["baseline_index_digest"], baseline_index)
+        production.fetch.return_value = {"binary_digest": current_digest}
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(launcher, "ROOT", Path(directory)), \
+                mock.patch.object(launcher, "Downloader", side_effect=[current, production]), \
+                self.assertRaisesRegex(download.DownloadError, "^baseline_not_distinct$"):
+            launcher.prepare(reference, "staging")
 
 
 if __name__ == "__main__":

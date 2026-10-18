@@ -23,7 +23,8 @@ class PublishedUpdateTests(RuntimeCase):
         cls.baseline = Path(supplied).resolve()
         if not cls.baseline.is_file():
             raise RuntimeError("RUNL_BASELINE_BINARY does not identify a downloaded executable")
-        client = download.Downloader()
+        cls.package_track = os.environ.get("RUNL_PACKAGE_TRACK", "production")
+        client = download.Downloader(track=cls.package_track)
         cls.package_digest = reference
         cls.objects = {}
 
@@ -31,7 +32,7 @@ class PublishedUpdateTests(RuntimeCase):
             body = client.read(kind, reference, maximum,
                                expected_size=expected["size"] if expected else None,
                                expected_digest=reference)
-            cls.objects[f"/v2/internal/runl/production/{kind}/{reference}"] = body
+            cls.objects[f"/v2/internal/runl/{cls.package_track}/{kind}/{reference}"] = body
             return body
 
         index = download.document(read("manifests", reference, download.MAX_METADATA), download.INDEX)
@@ -92,14 +93,14 @@ class PublishedUpdateTests(RuntimeCase):
         installed = self.installed_baseline()
         with self.mirror() as server:
             result = self.run_installed(
-                installed, "update", "--track", "production", "--version", self.package_digest,
+                installed, "update", "--track", self.package_track, "--version", self.package_digest,
                 environment={**server.environment, "RUNL_REGISTRY": server.origin},
             )
             self.assert_status(result, 0, "Published baseline could not update through verified HTTPS")
             self.assertTrue(installed.read_bytes() == self.current_bytes,
                             "Updater did not install the exact newer published executable")
             self.assertTrue(not server.errors, "HTTPS mirror reported an unexpected failure")
-            self.assertEqual(server.requests[0], ("GET", "/v2/internal/runl/production/manifests/" + self.package_digest))
+            self.assertEqual(server.requests[0], ("GET", f"/v2/internal/runl/{self.package_track}/manifests/" + self.package_digest))
             self.assertEqual(len(server.requests), 4, "Updater did not traverse the expected published OCI graph")
         version = self.run_installed(installed, "--version", environment={})
         self.assert_status(version, 0, "Updated executable could not run")
@@ -107,16 +108,17 @@ class PublishedUpdateTests(RuntimeCase):
                         "Updated executable did not report the selected published content identity")
 
     def test_corrupt_published_responses_preserve_the_distinct_installed_baseline(self):
-        paths = ["/v2/internal/runl/production/manifests/" + self.package_digest,
-                 "/v2/internal/runl/production/manifests/" + self.manifest_digest,
-                 "/v2/internal/runl/production/blobs/" + self.config_digest,
-                 "/v2/internal/runl/production/blobs/" + self.layer_digest]
+        prefix = f"/v2/internal/runl/{self.package_track}/"
+        paths = [prefix + "manifests/" + self.package_digest,
+                 prefix + "manifests/" + self.manifest_digest,
+                 prefix + "blobs/" + self.config_digest,
+                 prefix + "blobs/" + self.layer_digest]
         for path in paths:
             with self.subTest(component=path.split("/")[-2]):
                 installed = self.installed_baseline()
                 with self.mirror(damaged=path) as server:
                     result = self.run_installed(
-                        installed, "update", "--track", "production", "--version", self.package_digest,
+                        installed, "update", "--track", self.package_track, "--version", self.package_digest,
                         environment={**server.environment, "RUNL_REGISTRY": server.origin},
                     )
                     self.assertTrue(result.returncode != 0, "Updater accepted a corrupt published response")

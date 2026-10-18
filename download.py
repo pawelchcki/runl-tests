@@ -16,7 +16,11 @@ import urllib.error
 import urllib.request
 
 
-REGISTRY = "https://app.runnerlesshq.com/v2/internal/runl/production"
+REGISTRIES = {
+    "production": "https://app.runnerlesshq.com/v2/internal/runl/production",
+    "staging": "https://app.runnerlesshq.com/v2/internal/runl/staging",
+}
+REGISTRY = REGISTRIES["production"]
 USER_AGENT = "runl-public-tests/1.0"
 INDEX = "application/vnd.oci.image.index.v1+json"
 MANIFEST = "application/vnd.oci.image.manifest.v1+json"
@@ -30,6 +34,12 @@ DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 
 class DownloadError(Exception):
     """A fixed category safe to report without upstream response contents."""
+
+
+def registry(track):
+    if not isinstance(track, str) or track not in REGISTRIES:
+        raise DownloadError("invalid_track")
+    return REGISTRIES[track]
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -68,14 +78,16 @@ def document(data, media_type):
 
 
 class Downloader:
-    def __init__(self, opener=None):
+    def __init__(self, opener=None, track="production"):
+        self.registry = registry(track)
+        self.track = track
         self.opener = opener or urllib.request.build_opener(NoRedirect)
 
     def read(self, kind, reference, maximum, expected_size=None, expected_digest=None):
         # Only locally validated names are interpolated; descriptor URLs are ignored.
         if kind not in ("manifests", "blobs") or not (reference == "latest" and kind == "manifests" or DIGEST.fullmatch(reference)):
             raise DownloadError("invalid_reference")
-        request = urllib.request.Request(REGISTRY + "/" + kind + "/" + reference,
+        request = urllib.request.Request(self.registry + "/" + kind + "/" + reference,
                                          headers={"User-Agent": USER_AGENT, "Accept": INDEX + ", " + MANIFEST + ", application/json"})
         deadline = time.monotonic() + 120
         try:
@@ -173,7 +185,7 @@ class Downloader:
         if operating_system == "windows" and not output.name.lower().endswith(".exe"):
             output = output.with_name(output.name + ".exe")
         install(binary, output)
-        return {"index_digest": reference, "manifest_digest": selected["digest"],
+        return {"track": self.track, "index_digest": reference, "manifest_digest": selected["digest"],
                 "config_digest": config_descriptor["digest"], "layer_digest": layer_descriptor["digest"],
                 "binary_digest": binary_descriptor["digest"], "binary_size": len(binary),
                 "version": version, "os": operating_system, "architecture": architecture}
@@ -224,13 +236,15 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     resolve = commands.add_parser("resolve")
+    resolve.add_argument("--track", choices=tuple(REGISTRIES), default="production")
     resolve.add_argument("--reference", required=True)
     fetch = commands.add_parser("fetch")
+    fetch.add_argument("--track", choices=tuple(REGISTRIES), default="production")
     fetch.add_argument("--reference", required=True)
     fetch.add_argument("--output", required=True)
     options = parser.parse_args(argv)
     try:
-        downloader = Downloader()
+        downloader = Downloader(track=options.track)
         result = downloader.resolve(options.reference) if options.command == "resolve" else downloader.fetch(options.reference, options.output)
     except DownloadError as error:
         print("runl download failed: " + str(error), file=sys.stderr)

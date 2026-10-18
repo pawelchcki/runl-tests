@@ -8,10 +8,16 @@ on:
   workflow_dispatch:
     inputs:
       digest:
-        description: "Optional production OCI index digest (sha256: followed by 64 lowercase hex characters)"
+        description: "Optional OCI index digest from the selected track (sha256: followed by 64 lowercase hex characters)"
         required: false
         default: ""
         type: string
+      track:
+        description: "Anonymously published package track; automatic runs always use production"
+        required: true
+        default: production
+        type: choice
+        options: [production, staging]
   repository_dispatch:
     types: [runl-published]
 
@@ -25,6 +31,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       digest: ${{ steps.resolve.outputs.digest }}
+      track: ${{ steps.resolve.outputs.track }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -38,25 +45,22 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           MANUAL_DIGEST: ${{ inputs.digest }}
+          MANUAL_TRACK: ${{ inputs.track }}
           DISPATCH_DIGEST: ${{ github.event.client_payload.digest }}
         run: |
           import os
           import re
           import subprocess
           import sys
+          sys.path.insert(0, os.environ["GITHUB_WORKSPACE"])
+          from run import requested_package
 
-          event = os.environ["EVENT_NAME"]
-          requested = ""
-          if event == "repository_dispatch":
-              requested = os.environ.get("DISPATCH_DIGEST", "")
-              if not requested:
-                  raise SystemExit("runl-published requires an immutable package digest")
-          elif event == "workflow_dispatch":
-              requested = os.environ.get("MANUAL_DIGEST", "")
-          if requested and not re.fullmatch(r"sha256:[0-9a-f]{64}", requested):
-              raise SystemExit("Expected an immutable sha256 package digest")
+          track, requested = requested_package(
+              os.environ["EVENT_NAME"], os.environ.get("MANUAL_DIGEST", ""),
+              os.environ.get("MANUAL_TRACK", "production"), os.environ.get("DISPATCH_DIGEST", ""),
+          )
           result = subprocess.run(
-              [sys.executable, "download.py", "resolve", "--reference", requested or "latest"],
+              [sys.executable, "download.py", "resolve", "--track", track, "--reference", requested],
               check=True, stdout=subprocess.PIPE, text=True,
           )
           digest = result.stdout.strip()
@@ -64,7 +68,8 @@ jobs:
               raise SystemExit("The package resolver did not return an immutable digest")
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write("digest=" + digest + "\n")
-          print("Resolved public package:", digest)
+              output.write("track=" + track + "\n")
+          print("Resolved public package:", track, digest)
 
   native:
     name: Native acceptance (${{ matrix.runner }})
@@ -82,6 +87,7 @@ jobs:
           - windows-2025
     env:
       RUNL_PACKAGE_DIGEST: ${{ needs.resolve.outputs.digest }}
+      RUNL_PACKAGE_TRACK: ${{ needs.resolve.outputs.track }}
       PYTHONUNBUFFERED: "1"
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -114,7 +120,7 @@ jobs:
           digest = os.environ["RUNL_PACKAGE_DIGEST"]
           if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
               raise SystemExit("Missing immutable package digest")
-          receipt = prepare(digest)
+          receipt = prepare(digest, os.environ["RUNL_PACKAGE_TRACK"])
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
               output.write("RUNL_TEST_BINARY=" + receipt["binary"] + "\n")
               output.write("RUNL_BASELINE_BINARY=" + receipt["baseline_binary"] + "\n")
@@ -141,6 +147,8 @@ jobs:
 
           receipt = {
               "schema": 1,
+              "package_track": os.environ["RUNL_PACKAGE_TRACK"],
+              "baseline_track": "production",
               "package_digest": os.environ["RUNL_PACKAGE_DIGEST"],
               "executable_sha256": os.environ["RUNL_TEST_BINARY_SHA256"],
               "baseline_package_digest": os.environ["RUNL_BASELINE_DIGEST"],

@@ -50,13 +50,18 @@ def macos_osascript_preflight(environment):
     if sys.platform != "darwin":
         return "macos-osascript=not-applicable"
     # Independently authored public API queries. The random account never has a
-    # stored item; no query requests data or attributes and there are no writes.
+    # stored item; only opaque item references are requested, never contents or
+    # attributes, and there are no writes. References are never inspected.
     script = """
 ObjC.import('Foundation');
+ObjC.import('CoreFoundation');
 ObjC.import('Security');
 function run(arguments) {
     const summary = {copy: null, status: null, unlocked: null,
-        base: null, ui: null, search: null, limit: null, combined: null,
+        null_result: null, base: null, ui: null, search: null, limit: null, combined: null,
+        cast_base: null, cast_combined: null, dictionary: null, keys: null,
+        class_string: null, class_equal: null, cast_dictionary: null, cast_keys: null,
+        cast_class_string: null, cast_class_equal: null, cast_api: null,
         phase: 'default', error: null};
     try {
         const reference = Ref();
@@ -65,24 +70,42 @@ function run(arguments) {
             const flags = Ref();
             summary.status = $.SecKeychainGetStatus(reference[0], flags);
             if (summary.status === 0) summary.unlocked = (flags[0] & 1) ? 1 : 0;
-            for (const mode of ['base', 'ui', 'search', 'limit', 'combined']) {
+            summary.cast_api = typeof ObjC.castRefToObject === 'function' ? 1 : 0;
+            for (const mode of ['null_result', 'base', 'ui', 'search', 'limit', 'combined', 'cast_base', 'cast_combined']) {
                 summary.phase = mode;
-                const keys = [$.kSecClass, $.kSecAttrService, $.kSecAttrAccount];
-                const values = [$.kSecClassGenericPassword, $('runl-public-tests-readiness'), $(arguments[0])];
-                if (mode === 'ui' || mode === 'combined') {
-                    keys.push($.kSecUseAuthenticationUI);
-                    values.push($.kSecUseAuthenticationUIFail);
+                const cast = mode.indexOf('cast_') === 0;
+                if (cast && !summary.cast_api) continue;
+                const object = value => cast && value instanceof Ref ? ObjC.castRefToObject(value) : value;
+                const combined = mode === 'combined' || mode === 'cast_combined';
+                const keys = [object($.kSecClass), object($.kSecAttrService), object($.kSecAttrAccount)];
+                const values = [object($.kSecClassGenericPassword), $('runl-public-tests-readiness'), $(arguments[0])];
+                if (mode !== 'null_result') {
+                    keys.push(object($.kSecReturnRef));
+                    values.push(object($.kCFBooleanTrue));
                 }
-                if (mode === 'search' || mode === 'combined') {
-                    keys.push($.kSecMatchSearchList);
-                    values.push($.NSArray.arrayWithArray([reference[0]]));
+                if (mode === 'ui' || combined) {
+                    keys.push(object($.kSecUseAuthenticationUI));
+                    values.push(object($.kSecUseAuthenticationUIFail));
                 }
-                if (mode === 'limit' || mode === 'combined') {
-                    keys.push($.kSecMatchLimit);
-                    values.push($.kSecMatchLimitOne);
+                if (mode === 'search' || combined) {
+                    keys.push(object($.kSecMatchSearchList));
+                    values.push($.NSArray.arrayWithArray([object(reference[0])]));
+                }
+                if (mode === 'limit' || combined) {
+                    keys.push(object($.kSecMatchLimit));
+                    values.push(object($.kSecMatchLimitOne));
                 }
                 const query = $.NSDictionary.dictionaryWithObjectsForKeys(values, keys);
-                summary[mode] = $.SecItemCopyMatching(query, null);
+                if (mode === 'base' || mode === 'cast_base') {
+                    const prefix = cast ? 'cast_' : '';
+                    summary[prefix + 'dictionary'] = $.CFGetTypeID(query) === $.CFDictionaryGetTypeID() ? 1 : 0;
+                    summary[prefix + 'keys'] = Number(query.count);
+                    const classValue = query.objectForKey($('class'));
+                    summary[prefix + 'class_string'] = classValue.isNil() ? 0 : Number(classValue.isKindOfClass($.NSString));
+                    summary[prefix + 'class_equal'] = classValue.isNil() ? 0 : Number($.CFEqual(classValue, $.kSecClassGenericPassword));
+                }
+                const result = mode === 'null_result' ? null : Ref();
+                summary[mode] = $.SecItemCopyMatching(query, result);
             }
         }
         summary.phase = 'done';
@@ -110,8 +133,10 @@ function run(arguments) {
         values = json.loads(result.stdout)
     except (ValueError, UnicodeError):
         return prefix + "; category=invalid-status"
-    numeric = ("copy", "status", "unlocked", "base", "ui", "search", "limit", "combined")
-    phases = ("default", "base", "ui", "search", "limit", "combined", "done")
+    numeric = ("copy", "status", "unlocked", "null_result", "base", "ui", "search", "limit", "combined",
+               "cast_base", "cast_combined", "dictionary", "keys", "class_string", "class_equal",
+               "cast_dictionary", "cast_keys", "cast_class_string", "cast_class_equal", "cast_api")
+    phases = ("default", "null_result", "base", "ui", "search", "limit", "combined", "cast_base", "cast_combined", "done")
     errors = (None, "type-error", "reference-error", "error", "exception")
     if (not isinstance(values, dict) or set(values) != {*numeric, "phase", "error"}
             or any(value is not None and (type(value) is not int or not -(2**31) <= value < 2**31)
