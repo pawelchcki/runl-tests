@@ -46,166 +46,42 @@ def macos_keychain_preflight():
 
 
 def macos_osascript_preflight(environment):
-    """Check the public Security API in a child with the CLI's filtered env."""
+    """Read OS readiness in the CLI's filtered environment after a failure."""
     if sys.platform != "darwin":
         return "macos-osascript=not-applicable"
-    # Independently authored public API queries. The random account never has a
-    # stored item; only opaque item references are requested, never contents or
-    # attributes, and there are no writes. References are never inspected.
+    # Independent public API query: a fresh test account, opaque reference only,
+    # no item contents or attributes, no native-store writes.
     script = """
 ObjC.import('Foundation');
 ObjC.import('CoreFoundation');
 ObjC.import('Security');
 function run(arguments) {
     const summary = {copy: null, status: null, unlocked: null,
-        null_result: null, base: null, ui: null, search: null, limit: null, combined: null,
-        cast_base: null, cast_combined: null, dictionary: null, keys: null,
-        class_string: null, class_equal: null, cast_dictionary: null, cast_keys: null,
-        cast_class_string: null, cast_class_equal: null, cast_api: null,
-        constant_class_type: null, constant_class_ref: null, constant_class_known: null,
-        constant_service_type: null, constant_service_ref: null, constant_service_known: null,
-        constant_account_type: null, constant_account_ref: null, constant_account_known: null,
-        constant_password_type: null, constant_password_ref: null, constant_password_known: null,
-        constant_return_type: null, constant_return_ref: null, constant_return_known: null,
-        forced_cast: null, forced_keys: null, forced_error: null,
-        literal: null, literal_keys: null, literal_class: null, literal_error: null,
-        object_literal: null, object_literal_keys: null, object_literal_error: null,
-        incremental_raw: null, incremental_raw_keys: null, incremental_raw_error: null,
-        incremental_literal: null, incremental_literal_keys: null, incremental_literal_error: null,
-        incremental_cast: null, incremental_cast_keys: null, incremental_cast_error: null,
-        object_raw_values: null, object_raw_values_keys: null, object_raw_values_error: null,
-        constant_class_deref: null, constant_class_cast: null,
-        constant_service_deref: null, constant_service_cast: null,
-        constant_account_deref: null, constant_account_cast: null,
-        constant_password_deref: null, constant_password_cast: null,
-        constant_return_deref: null, constant_return_cast: null,
-        phase: 'default', error: null};
+        queryStatus: null, queryKeyCount: null, phase: 'default', error: null};
     try {
         const reference = Ref();
         summary.copy = $.SecKeychainCopyDefault(reference);
         if (summary.copy === 0) {
+            summary.phase = 'status';
             const flags = Ref();
             summary.status = $.SecKeychainGetStatus(reference[0], flags);
             if (summary.status === 0) summary.unlocked = (flags[0] & 1) ? 1 : 0;
-            summary.cast_api = typeof ObjC.castRefToObject === 'function' ? 1 : 0;
-            summary.phase = 'constants';
-            const types = ['undefined', 'object', 'function', 'string', 'number', 'boolean', 'symbol', 'bigint'];
-            const constants = [['class', $.kSecClass, 'class'], ['service', $.kSecAttrService, 'svce'],
-                ['account', $.kSecAttrAccount, 'acct'], ['password', $.kSecClassGenericPassword, 'genp'],
-                ['return', $.kSecReturnRef, 'r_Ref']];
-            for (const entry of constants) {
-                const prefix = 'constant_' + entry[0];
-                summary[prefix + '_type'] = types.indexOf(typeof entry[1]);
-                summary[prefix + '_ref'] = Number(entry[1] instanceof Ref);
-                try { summary[prefix + '_known'] = Number(ObjC.unwrap(entry[1]) === entry[2]); }
-                catch (_) { summary[prefix + '_known'] = 0; }
-                try { summary[prefix + '_deref'] = Number(ObjC.unwrap(entry[1][0]) === entry[2]); }
-                catch (_) { summary[prefix + '_deref'] = 0; }
-                try { summary[prefix + '_cast'] = Number(ObjC.unwrap(ObjC.castRefToObject(entry[1])) === entry[2]); }
-                catch (_) { summary[prefix + '_cast'] = 0; }
-            }
-            for (const mode of ['null_result', 'base', 'ui', 'search', 'limit', 'combined', 'cast_base', 'cast_combined']) {
-                summary.phase = mode;
-                const cast = mode.indexOf('cast_') === 0;
-                if (cast && !summary.cast_api) continue;
-                const object = value => cast && value instanceof Ref ? ObjC.castRefToObject(value) : value;
-                const combined = mode === 'combined' || mode === 'cast_combined';
-                const keys = [object($.kSecClass), object($.kSecAttrService), object($.kSecAttrAccount)];
-                const values = [object($.kSecClassGenericPassword), $('runl-public-tests-readiness'), $(arguments[0])];
-                if (mode !== 'null_result') {
-                    keys.push(object($.kSecReturnRef));
-                    values.push(object($.kCFBooleanTrue));
-                }
-                if (mode === 'ui' || combined) {
-                    keys.push(object($.kSecUseAuthenticationUI));
-                    values.push(object($.kSecUseAuthenticationUIFail));
-                }
-                if (mode === 'search' || combined) {
-                    keys.push(object($.kSecMatchSearchList));
-                    values.push($.NSArray.arrayWithArray([object(reference[0])]));
-                }
-                if (mode === 'limit' || combined) {
-                    keys.push(object($.kSecMatchLimit));
-                    values.push(object($.kSecMatchLimitOne));
-                }
-                const query = $.NSDictionary.dictionaryWithObjectsForKeys(values, keys);
-                if (mode === 'base' || mode === 'cast_base') {
-                    const prefix = cast ? 'cast_' : '';
-                    summary[prefix + 'dictionary'] = $.CFGetTypeID(query) === $.CFDictionaryGetTypeID() ? 1 : 0;
-                    summary[prefix + 'keys'] = Number(query.count);
-                    const classValue = query.objectForKey($('class'));
-                    summary[prefix + 'class_string'] = classValue.isNil() ? 0 : Number(classValue.isKindOfClass($.NSString));
-                    summary[prefix + 'class_equal'] = classValue.isNil() ? 0 : Number($.CFEqual(classValue, $.kSecClassGenericPassword));
-                }
-                const result = mode === 'null_result' ? null : Ref();
-                summary[mode] = $.SecItemCopyMatching(query, result);
-            }
-            const exceptionCode = error => error.name === 'TypeError' ? 1
-                : error.name === 'ReferenceError' ? 2 : error.name === 'Error' ? 3 : 4;
-            summary.phase = 'forced_cast';
-            if (summary.cast_api) {
-                try {
-                    const keys = [$.kSecClass, $.kSecAttrService, $.kSecAttrAccount, $.kSecReturnRef]
-                        .map(value => ObjC.castRefToObject(value));
-                    const values = [ObjC.castRefToObject($.kSecClassGenericPassword),
-                        $('runl-public-tests-readiness'), $(arguments[0]), ObjC.castRefToObject($.kCFBooleanTrue)];
-                    const query = $.NSDictionary.dictionaryWithObjectsForKeys(values, keys);
-                    summary.forced_keys = Number(query.count);
-                    summary.forced_cast = $.SecItemCopyMatching(query, Ref());
-                    summary.forced_error = 0;
-                } catch (error) { summary.forced_error = exceptionCode(error); }
-            }
-            // Apple's public SecItemConstants.c defines these API string values.
-            summary.phase = 'literal';
-            try {
-                const query = $.NSDictionary.dictionaryWithObjectsForKeys(
-                    [$('genp'), $('runl-public-tests-readiness'), $(arguments[0]), $(true)],
-                    [$('class'), $('svce'), $('acct'), $('r_Ref')]);
-                summary.literal_keys = Number(query.count);
-                summary.literal_class = Number(ObjC.unwrap(query.objectForKey($('class'))) === 'genp');
-                summary.literal = $.SecItemCopyMatching(query, Ref());
-                summary.literal_error = 0;
-            } catch (error) { summary.literal_error = exceptionCode(error); }
-            summary.phase = 'object_literal';
-            try {
-                const query = $({'class': 'genp', 'svce': 'runl-public-tests-readiness',
-                    'acct': arguments[0], 'r_Ref': true});
-                summary.object_literal_keys = Number(query.count);
-                summary.object_literal = $.SecItemCopyMatching(query, Ref());
-                summary.object_literal_error = 0;
-            } catch (error) { summary.object_literal_error = exceptionCode(error); }
-            for (const mode of ['incremental_raw', 'incremental_literal', 'incremental_cast', 'object_raw_values']) {
-                summary.phase = mode;
-                try {
-                    let query;
-                    if (mode === 'object_raw_values') {
-                        query = $({'class': $.kSecClassGenericPassword,
-                            'svce': 'runl-public-tests-readiness', 'acct': arguments[0], 'r_Ref': $.kCFBooleanTrue});
-                    } else {
-                        query = $.NSMutableDictionary.dictionary;
-                        const entries = mode === 'incremental_cast'
-                            ? [[ObjC.castRefToObject($.kSecClass), ObjC.castRefToObject($.kSecClassGenericPassword)],
-                               [ObjC.castRefToObject($.kSecAttrService), $('runl-public-tests-readiness')],
-                               [ObjC.castRefToObject($.kSecAttrAccount), $(arguments[0])],
-                               [ObjC.castRefToObject($.kSecReturnRef), ObjC.castRefToObject($.kCFBooleanTrue)],
-                               [ObjC.castRefToObject($.kSecUseAuthenticationUI), ObjC.castRefToObject($.kSecUseAuthenticationUIFail)],
-                               [ObjC.castRefToObject($.kSecMatchLimit), ObjC.castRefToObject($.kSecMatchLimitOne)],
-                               [ObjC.castRefToObject($.kSecMatchSearchList), $.NSArray.arrayWithObject(ObjC.castRefToObject(reference[0]))]]
-                            : mode === 'incremental_raw'
-                            ? [[$.kSecClass, $.kSecClassGenericPassword],
-                               [$.kSecAttrService, $('runl-public-tests-readiness')],
-                               [$.kSecAttrAccount, $(arguments[0])], [$.kSecReturnRef, $.kCFBooleanTrue]]
-                            : [[$('class'), $('genp')], [$('svce'), $('runl-public-tests-readiness')],
-                               [$('acct'), $(arguments[0])], [$('r_Ref'), $(true)]];
-                        for (const entry of entries) query.setObjectForKey(entry[1], entry[0]);
-                    }
-                    summary[mode + '_keys'] = Number(query.count);
-                    summary[mode] = $.SecItemCopyMatching(query, Ref());
-                    summary[mode + '_error'] = 0;
-                } catch (error) { summary[mode + '_error'] = exceptionCode(error); }
-            }
+            summary.phase = 'query';
+            const query = $.NSMutableDictionary.dictionary;
+            const entries = [
+                [ObjC.castRefToObject($.kSecClass), ObjC.castRefToObject($.kSecClassGenericPassword)],
+                [ObjC.castRefToObject($.kSecAttrService), $('runl-public-tests-readiness')],
+                [ObjC.castRefToObject($.kSecAttrAccount), $(arguments[0])],
+                [ObjC.castRefToObject($.kSecReturnRef), ObjC.castRefToObject($.kCFBooleanTrue)],
+                [ObjC.castRefToObject($.kSecUseAuthenticationUI), ObjC.castRefToObject($.kSecUseAuthenticationUIFail)],
+                [ObjC.castRefToObject($.kSecMatchLimit), ObjC.castRefToObject($.kSecMatchLimitOne)],
+                [ObjC.castRefToObject($.kSecMatchSearchList), $.NSArray.arrayWithObject(ObjC.castRefToObject(reference[0]))],
+            ];
+            for (const entry of entries) query.setObjectForKey(entry[1], entry[0]);
+            summary.queryKeyCount = Number(query.count);
+            summary.queryStatus = $.SecItemCopyMatching(query, Ref());
+            summary.phase = 'done';
         }
-        summary.phase = 'done';
     } catch (error) {
         summary.error = error.name === 'TypeError' ? 'type-error'
             : error.name === 'ReferenceError' ? 'reference-error'
@@ -230,26 +106,8 @@ function run(arguments) {
         values = json.loads(result.stdout)
     except (ValueError, UnicodeError):
         return prefix + "; category=invalid-status"
-    numeric = ("copy", "status", "unlocked", "null_result", "base", "ui", "search", "limit", "combined",
-               "cast_base", "cast_combined", "dictionary", "keys", "class_string", "class_equal",
-               "cast_dictionary", "cast_keys", "cast_class_string", "cast_class_equal", "cast_api",
-               "constant_class_type", "constant_class_ref", "constant_class_known",
-               "constant_service_type", "constant_service_ref", "constant_service_known",
-               "constant_account_type", "constant_account_ref", "constant_account_known",
-               "constant_password_type", "constant_password_ref", "constant_password_known",
-               "constant_return_type", "constant_return_ref", "constant_return_known",
-               "forced_cast", "forced_keys", "forced_error", "literal", "literal_keys", "literal_class", "literal_error",
-               "object_literal", "object_literal_keys", "object_literal_error",
-               "incremental_raw", "incremental_raw_keys", "incremental_raw_error",
-               "incremental_literal", "incremental_literal_keys", "incremental_literal_error",
-               "incremental_cast", "incremental_cast_keys", "incremental_cast_error",
-               "object_raw_values", "object_raw_values_keys", "object_raw_values_error",
-               "constant_class_deref", "constant_class_cast", "constant_service_deref", "constant_service_cast",
-               "constant_account_deref", "constant_account_cast", "constant_password_deref", "constant_password_cast",
-               "constant_return_deref", "constant_return_cast")
-    phases = ("default", "constants", "null_result", "base", "ui", "search", "limit", "combined", "cast_base",
-              "cast_combined", "forced_cast", "literal", "object_literal", "incremental_raw", "incremental_literal", "incremental_cast",
-              "object_raw_values", "done")
+    numeric = ("copy", "status", "unlocked", "queryStatus", "queryKeyCount")
+    phases = ("default", "status", "query", "done")
     errors = (None, "type-error", "reference-error", "error", "exception")
     if (not isinstance(values, dict) or set(values) != {*numeric, "phase", "error"}
             or any(value is not None and (type(value) is not int or not -(2**31) <= value < 2**31)
